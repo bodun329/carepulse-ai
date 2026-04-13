@@ -2,15 +2,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
+import spacy
+from pymongo import MongoClient
 
-# ----------------------------
-# App setup
-# ----------------------------
 app = FastAPI()
 
-# ----------------------------
-# CORS FIX (frontend connection)
-# ----------------------------
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,24 +16,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------------------
-# Load ML model
-# ----------------------------
+# NLP
+nlp = spacy.load("en_core_web_sm")
+
+def preprocess(text):
+    doc = nlp(text.lower())
+    return " ".join([t.lemma_ for t in doc if t.is_alpha])
+
+# LOAD MODEL
 model = joblib.load("model.pkl")
 vectorizer = joblib.load("vectorizer.pkl")
 
-# ----------------------------
-# Request body format
-# ----------------------------
+# DATABASE (MongoDB local)
+client = MongoClient("mongodb://localhost:27017")
+db = client["carepulse"]
+collection = db["patients"]
+
 class Input(BaseModel):
     text: str
 
-# ----------------------------
-# Prediction endpoint
-# ----------------------------
 @app.post("/predict")
 def predict(data: Input):
-    X = vectorizer.transform([data.text])
+    cleaned = preprocess(data.text)
+
+    X = vectorizer.transform([cleaned])
     prob = model.predict_proba(X)[0][1]
 
     if prob > 0.7:
@@ -45,6 +48,14 @@ def predict(data: Input):
         risk = "MEDIUM"
     else:
         risk = "LOW"
+
+    # SAVE TO DB
+    collection.insert_one({
+        "text": data.text,
+        "cleaned": cleaned,
+        "risk": risk,
+        "score": float(prob)
+    })
 
     return {
         "risk": risk,
