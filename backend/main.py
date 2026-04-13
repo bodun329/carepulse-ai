@@ -1,63 +1,62 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
-import spacy
-from pymongo import MongoClient
+import re
 
+# Initialize app
 app = FastAPI()
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# NLP
-nlp = spacy.load("en_core_web_sm")
-
-def preprocess(text):
-    doc = nlp(text.lower())
-    return " ".join([t.lemma_ for t in doc if t.is_alpha])
-
-# LOAD MODEL
+# Load model + vectorizer
 model = joblib.load("model.pkl")
 vectorizer = joblib.load("vectorizer.pkl")
 
-# DATABASE (MongoDB local)
-client = MongoClient("mongodb://localhost:27017")
-db = client["carepulse"]
-collection = db["patients"]
+# Request schema
+class SymptomRequest(BaseModel):
+    symptoms: str
 
-class Input(BaseModel):
-    text: str
+# Simple text cleaning (replaces spaCy)
+def clean_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    return text
 
+# Root route (test if API works)
+@app.get("/")
+def home():
+    return {"message": "CarePulse AI Backend is running 🚀"}
+
+# Prediction route
 @app.post("/predict")
-def predict(data: Input):
-    cleaned = preprocess(data.text)
+def predict(data: SymptomRequest):
+    try:
+        # Clean input
+        cleaned = clean_text(data.symptoms)
 
-    X = vectorizer.transform([cleaned])
-    prob = model.predict_proba(X)[0][1]
+        # Transform input
+        vector = vectorizer.transform([cleaned])
 
-    if prob > 0.7:
-        risk = "HIGH"
-    elif prob > 0.4:
-        risk = "MEDIUM"
-    else:
-        risk = "LOW"
+        # Predict
+        prediction = model.predict(vector)[0]
 
-    # SAVE TO DB
-    collection.insert_one({
-        "text": data.text,
-        "cleaned": cleaned,
-        "risk": risk,
-        "score": float(prob)
-    })
+        # Confidence (if available)
+        if hasattr(model, "predict_proba"):
+            confidence = max(model.predict_proba(vector)[0]) * 100
+        else:
+            confidence = 75.0  # fallback
 
-    return {
-        "risk": risk,
-        "score": float(prob)
-    }
+        # Risk logic (customizable)
+        if confidence > 70:
+            risk = "HIGH"
+        elif confidence > 40:
+            risk = "MEDIUM"
+        else:
+            risk = "LOW"
+
+        return {
+            "prediction": str(prediction),
+            "confidence": round(confidence, 2),
+            "risk": risk
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
